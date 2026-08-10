@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import requests
 import streamlit as st
 from datetime import datetime, time as dtime
@@ -145,7 +148,56 @@ with st.expander("1日の全体スケジュールを見る"):
         )
 
 st.divider()
-st.info("メール・チャット・今日のtodo・Etsy/Substack状況などは次のバージョンで追加予定です。", icon="🚧")
+
+# ── 今日のtodo セクション ──────────────────────────────────────
+st.subheader("✅ 今日のtodo")
+
+TODO_FILE = Path(__file__).parent / "data" / "today.md"
+
+SECTION_META = {
+    "今日やったこと": ("✅", True),   # (アイコン, 完了済みとして薄く見せる)
+    "明日やること": ("📅", False),
+    "今後やること": ("🗓", False),
+}
+
+
+def parse_todo_md(text: str):
+    """`## 見出し` ごとに区切って {見出し: [箇条書き, ...]} を返す"""
+    sections = {}
+    current = None
+    for line in text.splitlines():
+        m = re.match(r"^##\s*[^\w\s]*\s*(.+)$", line.strip())
+        if m:
+            current = m.group(1).strip()
+            sections[current] = []
+            continue
+        item = re.match(r"^-\s+(.*)$", line.strip())
+        if item and current:
+            sections[current].append(item.group(1).strip())
+    return sections
+
+
+if TODO_FILE.exists():
+    todo_text = TODO_FILE.read_text(encoding="utf-8")
+    sections = parse_todo_md(todo_text)
+
+    tab_labels = [f"{SECTION_META.get(name, ('📌', False))[0]} {name}" for name in sections]
+    tabs = st.tabs(tab_labels) if sections else []
+
+    for tab, (name, items) in zip(tabs, sections.items()):
+        with tab:
+            if not items:
+                st.caption("（まだ空です）")
+                continue
+            for it in items:
+                st.markdown(f"- {it}")
+
+    st.caption(f"最終同期: このファイルはPCから定期的に自動送信されています")
+else:
+    st.info("todoデータがまだ同期されていません。", icon="🚧")
+
+st.divider()
+st.info("メール・チャット・Etsy/Substack状況などは次のバージョンで追加予定です。", icon="🚧")
 
 st.markdown(
     """
