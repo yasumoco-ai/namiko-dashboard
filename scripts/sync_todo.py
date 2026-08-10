@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-~/todo/YYYY-MM-DD.md（今日の分）を namiko-dashboard/data/today.md にコピーし、
-変更があればgit commit & pushする。
+~/todo/YYYY-MM-DD.md（今日の分）を、非公開のGitHub Gistへ同期する。
 
-Streamlit Cloud はクラウド上で動くためローカルの ~/todo/ を直接読めない。
-このスクリプトが「ローカル→GitHub」の橋渡しをすることで、
-app.py はリポジトリ内の data/today.md を読むだけで最新のtodoを表示できる。
+namiko-dashboardのリポジトリはStreamlit Community Cloud（無料版）の制約上
+公開(Public)にする必要があるため、個人の予定が入るtodoの中身はリポジトリに
+コミットせず、このスクリプトが直接Gist(secret)へpushする。
+app.py側はこのGistをGist IDだけを頼りに読みに行く（IDはStreamlit Secretsに
+保存し、公開リポジトリには一切書かない）。
+
+事前準備: `gh gist create` で1回だけsecret gistを作成し、
+そのgist IDを ~/Projects/namiko-dashboard/.gist_id に保存しておくこと
+（.gist_idは.gitignore対象、リポジトリには含まれない）。
 """
 import subprocess
 import sys
@@ -16,10 +21,17 @@ from zoneinfo import ZoneInfo
 JST = ZoneInfo("Asia/Tokyo")
 TODO_DIR = Path.home() / "todo"
 REPO_DIR = Path(__file__).resolve().parent.parent
-DEST = REPO_DIR / "data" / "today.md"
+GIST_ID_FILE = REPO_DIR / ".gist_id"
 
 
 def main():
+    if not GIST_ID_FILE.exists():
+        print(f"[sync_todo] {GIST_ID_FILE} が見つかりません。"
+              f"先に `gh gist create` でgistを作成しIDを保存してください", file=sys.stderr)
+        sys.exit(1)
+
+    gist_id = GIST_ID_FILE.read_text(encoding="utf-8").strip()
+
     today = datetime.now(JST).strftime("%Y-%m-%d")
     src = TODO_DIR / f"{today}.md"
 
@@ -27,34 +39,16 @@ def main():
         print(f"[sync_todo] {src} が見つかりません、スキップ")
         return
 
-    DEST.parent.mkdir(parents=True, exist_ok=True)
-    new_content = src.read_text(encoding="utf-8")
-
-    if DEST.exists() and DEST.read_text(encoding="utf-8") == new_content:
-        print("[sync_todo] 変更なし、スキップ")
-        return
-
-    DEST.write_text(new_content, encoding="utf-8")
-
-    subprocess.run(["git", "-C", str(REPO_DIR), "add", "data/today.md"], check=True)
     result = subprocess.run(
-        ["git", "-C", str(REPO_DIR), "diff", "--cached", "--quiet"]
+        ["gh", "gist", "edit", gist_id, "--filename", "today.md", str(src)],
+        capture_output=True, text=True,
     )
-    if result.returncode == 0:
-        print("[sync_todo] ステージ後も差分なし、スキップ")
-        return
+    if result.returncode != 0:
+        print(f"[sync_todo] gist更新に失敗: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
 
-    subprocess.run(
-        ["git", "-C", str(REPO_DIR), "commit", "-m", f"sync todo {today}"],
-        check=True,
-    )
-    subprocess.run(["git", "-C", str(REPO_DIR), "push"], check=True)
-    print(f"[sync_todo] {today} 分を同期・pushしました")
+    print(f"[sync_todo] {today} 分をGistへ同期しました")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except subprocess.CalledProcessError as e:
-        print(f"[sync_todo] エラー: {e}", file=sys.stderr)
-        sys.exit(1)
+    main()

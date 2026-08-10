@@ -1,5 +1,4 @@
 import re
-from pathlib import Path
 
 import requests
 import streamlit as st
@@ -10,6 +9,21 @@ from streamlit_autorefresh import st_autorefresh
 JST = pytz.timezone("Asia/Tokyo")
 
 st.set_page_config(page_title="なみ子ダッシュボード", page_icon="🦉", layout="centered")
+
+# ── 簡易パスワードゲート ─────────────────────────────────────────
+# リポジトリ自体はStreamlit Community Cloudの制約でPublicにする必要があるため、
+# 個人情報を含む内容(今日のtodo等)を見るにはここで簡単な認証をかける。
+_dashboard_password = st.secrets.get("DASHBOARD_PASSWORD")
+if _dashboard_password:
+    if not st.session_state.get("authed"):
+        pw = st.text_input("パスワード", type="password")
+        if pw == _dashboard_password:
+            st.session_state["authed"] = True
+            st.rerun()
+        elif pw:
+            st.error("パスワードが違います")
+        if not st.session_state.get("authed"):
+            st.stop()
 
 # 1分ごとに自動更新（ライフフローチャートの現在地点を追従させるため）
 st_autorefresh(interval=60 * 1000, key="dashboard_refresh")
@@ -150,9 +164,22 @@ with st.expander("1日の全体スケジュールを見る"):
 st.divider()
 
 # ── 今日のtodo セクション ──────────────────────────────────────
+# 個人の予定を含むため、公開リポジトリには置かず非公開Gistから取得する。
+# Gist IDはStreamlit Secretsに保存（リポジトリには一切書かない）。
 st.subheader("✅ 今日のtodo")
 
-TODO_FILE = Path(__file__).parent / "data" / "today.md"
+GIST_ID = st.secrets.get("TODO_GIST_ID")
+
+
+@st.cache_data(ttl=300)  # 5分キャッシュ（Gist APIを毎回叩かない）
+def fetch_todo_from_gist(gist_id: str) -> str | None:
+    try:
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", timeout=10)
+        r.raise_for_status()
+        return r.json()["files"]["today.md"]["content"]
+    except Exception:
+        return None
+
 
 SECTION_META = {
     "今日やったこと": ("✅", True),   # (アイコン, 完了済みとして薄く見せる)
@@ -177,8 +204,9 @@ def parse_todo_md(text: str):
     return sections
 
 
-if TODO_FILE.exists():
-    todo_text = TODO_FILE.read_text(encoding="utf-8")
+todo_text = fetch_todo_from_gist(GIST_ID) if GIST_ID else None
+
+if todo_text:
     sections = parse_todo_md(todo_text)
 
     tab_labels = [f"{SECTION_META.get(name, ('📌', False))[0]} {name}" for name in sections]
@@ -192,9 +220,11 @@ if TODO_FILE.exists():
             for it in items:
                 st.markdown(f"- {it}")
 
-    st.caption(f"最終同期: このファイルはPCから定期的に自動送信されています")
+    st.caption("PCから10分おきに自動同期されています")
+elif GIST_ID:
+    st.info("todoデータの取得に失敗しました。", icon="🚧")
 else:
-    st.info("todoデータがまだ同期されていません。", icon="🚧")
+    st.info("todoデータがまだ設定されていません。", icon="🚧")
 
 st.divider()
 st.info("メール・チャット・Etsy/Substack状況などは次のバージョンで追加予定です。", icon="🚧")
