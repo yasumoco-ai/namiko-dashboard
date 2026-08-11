@@ -169,6 +169,7 @@ st.divider()
 st.subheader("✅ 今日のtodo")
 
 GIST_ID = st.secrets.get("TODO_GIST_ID")
+GIST_WRITE_TOKEN = st.secrets.get("GIST_WRITE_TOKEN")  # Gist専用スコープの弱い権限のトークン
 
 
 @st.cache_data(ttl=300)  # 5分キャッシュ（Gist APIを毎回叩かない）
@@ -179,6 +180,72 @@ def fetch_todo_from_gist(gist_id: str) -> str | None:
         return r.json()["files"]["today.md"]["content"]
     except Exception:
         return None
+
+
+def fetch_todo_from_gist_fresh(gist_id: str) -> str | None:
+    """書き込み前に使う、キャッシュを経由しない最新取得（他経路の更新と衝突しないため）"""
+    try:
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", timeout=10)
+        r.raise_for_status()
+        return r.json()["files"]["today.md"]["content"]
+    except Exception:
+        return None
+
+
+def toggle_checklist_item(gist_id: str, write_token: str, target_index: int, new_checked: bool) -> bool:
+    """チェックリストセクションのN番目(1始まり)の項目の完了状態を書き換えてGistへPATCHする。
+    成功したらTrueを返す。ダッシュボードからの書き戻しなので、直前に最新内容を取り直してから
+    書き換える(10分おきのローカル同期と衝突する時間差を極力小さくするため)。"""
+    content = fetch_todo_from_gist_fresh(gist_id)
+    if content is None:
+        return False
+
+    lines = content.splitlines()
+    out_lines = []
+    in_checklist = False
+    count = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_checklist = "今日のtodo(チェックリスト)" in stripped
+            out_lines.append(line)
+            continue
+        if in_checklist:
+            m = re.match(r"^(-\s*)\[( |x|X)\](\s*.*)$", stripped)
+            if m:
+                count += 1
+                if count == target_index:
+                    mark = "x" if new_checked else " "
+                    line = f"{m.group(1)}[{mark}]{m.group(3)}"
+        out_lines.append(line)
+
+    new_content = "\n".join(out_lines) + "\n"
+
+    try:
+        r = requests.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            headers={
+                "Authorization": f"Bearer {write_token}",
+                "Accept": "application/vnd.github+json",
+            },
+            json={"files": {"today.md": {"content": new_content}}},
+            timeout=10,
+        )
+        r.raise_for_status()
+    except Exception:
+        return False
+
+    fetch_todo_from_gist.clear()  # キャッシュを破棄して次回表示で最新を取る
+    return True
+
+
+def make_checklist_toggle_handler(index: int, new_value_key: str):
+    def handler():
+        new_checked = st.session_state[new_value_key]
+        ok = toggle_checklist_item(GIST_ID, GIST_WRITE_TOKEN, index, new_checked)
+        if not ok:
+            st.session_state["_checklist_toggle_error"] = True
+    return handler
 
 
 SECTION_META = {
@@ -235,8 +302,28 @@ if todo_text:
                 st.caption("（まだ空です）")
                 continue
             is_checklist = (name == "今日のtodo(チェックリスト)")
-            for i, it in enumerate(items, start=1):
-                render_item(it, number=i if is_checklist else None)
+            if is_checklist and GIST_WRITE_TOKEN:
+                if st.session_state.get("_checklist_toggle_error"):
+                    st.warning("チェックの保存に失敗しました。もう一度お試しください。")
+                    st.session_state["_checklist_toggle_error"] = False
+                for i, it in enumerate(items, start=1):
+                    m = re.match(r"^\[( |x|X)\]\s*(.*)$", it)
+                    if not m:
+                        st.markdown(f"- {it}")
+                        continue
+                    checked, label = m.group(1).lower() == "x", m.group(2)
+                    widget_key = f"chk_{i}_{hash(label) & 0xffff}"
+                    st.checkbox(
+                        f"{i}. {label}",
+                        value=checked,
+                        key=widget_key,
+                        on_change=make_checklist_toggle_handler(i, widget_key),
+                    )
+            else:
+                for i, it in enumerate(items, start=1):
+                    render_item(it, number=i if is_checklist else None)
+                if is_checklist and not GIST_WRITE_TOKEN:
+                    st.caption("(画面からのチェックはまだ未設定です)")
 
     st.caption("PCから10分おきに自動同期されています")
 elif GIST_ID:

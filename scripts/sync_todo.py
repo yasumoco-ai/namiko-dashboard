@@ -17,9 +17,18 @@ cronはログインセッション外で動くためキーチェーンにアク�
 なる（2026-08-11に実際発生・原因特定）。そのため ~/todo/.gh_token に
 `gh auth token` の出力を保存しておき、このスクリプトが `GH_TOKEN` 環境変数として
 渡すことで回避する（.gh_tokenはgit管理下に置かない。パーミッション600推奨）。
+
+ダッシュボード側からのチェックボックス書き戻しとの競合について:
+namiko-dashboard側もこのGistに直接書き込めるようになったため（2026-08-11）、
+このスクリプトが単純に「ローカルの内容で無条件上書き」すると、ダッシュボード側で
+付けたチェックが10分以内に消えてしまう恐れがある。そのため、push前に必ず
+現在のGistの内容を取得し、チェックリスト内で「Gist側はチェック済みだが
+ローカル側は未チェック」の項目があればローカル側にも先に反映してから
+pushする（テキスト一致でマッチング）。
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -87,6 +96,58 @@ def record_success():
         FAIL_COUNT_FILE.unlink()
 
 
+def fetch_gist_content(gist_id, env):
+    result = subprocess.run(
+        ["gh", "api", f"gists/{gist_id}"],
+        capture_output=True, text=True, env=env,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)["files"]["today.md"]["content"]
+    except (KeyError, json.JSONDecodeError):
+        return None
+
+
+def checked_labels_in_checklist(text):
+    """テキストのチェックリストセクションから、チェック済み項目のラベル文字列集合を返す"""
+    labels = set()
+    in_checklist = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_checklist = "今日のtodo(チェックリスト)" in stripped
+            continue
+        if in_checklist:
+            m = re.match(r"^-\s*\[( |x|X)\]\s*(.*)$", stripped)
+            if m and m.group(1).lower() == "x":
+                labels.add(m.group(2).strip())
+    return labels
+
+
+def merge_gist_checks_into_local(local_text, gist_checked_labels):
+    """Gist側で既にチェック済みの項目を、ローカルのテキストにも反映する。
+    (更新後テキスト, 変更があったかどうか) のタプルを返す"""
+    if not gist_checked_labels:
+        return local_text, False
+    out_lines = []
+    in_checklist = False
+    changed = False
+    for line in local_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_checklist = "今日のtodo(チェックリスト)" in stripped
+            out_lines.append(line)
+            continue
+        if in_checklist:
+            m = re.match(r"^(\s*-\s*)\[( )\](\s*)(.*)$", line)
+            if m and m.group(4).strip() in gist_checked_labels:
+                line = f"{m.group(1)}[x]{m.group(3)}{m.group(4)}"
+                changed = True
+        out_lines.append(line)
+    return "\n".join(out_lines) + ("\n" if local_text.endswith("\n") else ""), changed
+
+
 def main():
     if not GIST_ID_FILE.exists():
         print(f"[sync_todo] {GIST_ID_FILE} が見つかりません。"
@@ -106,6 +167,16 @@ def main():
     env = os.environ.copy()
     if GH_TOKEN_FILE.exists():
         env["GH_TOKEN"] = GH_TOKEN_FILE.read_text(encoding="utf-8").strip()
+
+    # ダッシュボード側で先にチェックされた項目があれば、ローカルにも反映してから push する
+    gist_content = fetch_gist_content(gist_id, env)
+    if gist_content is not None:
+        local_text = src.read_text(encoding="utf-8")
+        gist_checked = checked_labels_in_checklist(gist_content)
+        merged_text, changed = merge_gist_checks_into_local(local_text, gist_checked)
+        if changed:
+            src.write_text(merged_text, encoding="utf-8")
+            print("[sync_todo] ダッシュボード側のチェックをローカルに反映しました")
 
     result = subprocess.run(
         ["gh", "gist", "edit", gist_id, "--filename", "today.md", str(src)],
