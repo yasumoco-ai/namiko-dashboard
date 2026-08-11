@@ -18,9 +18,11 @@ cronはログインセッション外で動くためキーチェーンにアク�
 `gh auth token` の出力を保存しておき、このスクリプトが `GH_TOKEN` 環境変数として
 渡すことで回避する（.gh_tokenはgit管理下に置かない。パーミッション600推奨）。
 """
+import json
 import os
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,12 +32,66 @@ TODO_DIR = Path.home() / "todo"
 REPO_DIR = Path(__file__).resolve().parent.parent
 GIST_ID_FILE = REPO_DIR / ".gist_id"
 GH_TOKEN_FILE = TODO_DIR / ".gh_token"
+FAIL_COUNT_FILE = TODO_DIR / ".sync_todo_fail_count"
+DISCORD_TOKEN_FILE = TODO_DIR / ".discord_token"
+
+# 連続でこの回数失敗したらDiscordに一報する（10分間隔なら約1時間分）
+FAIL_ALERT_THRESHOLD = 6
+
+DISCORD_CHANNEL = "1507595262301048894"
+
+
+def notify_discord(message):
+    # このリポジトリはStreamlit Cloud用にPublicにしているため、
+    # BotトークンはGitHub Push Protectionにも指摘される通りハードコード禁止。
+    # ~/todo/.discord_token（git管理外）から読み込む。
+    if not DISCORD_TOKEN_FILE.exists():
+        return
+    token = DISCORD_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    data = json.dumps({"content": message}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{DISCORD_CHANNEL}/messages",
+        data=data,
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://discord.com, 10)",
+        },
+    )
+    try:
+        urllib.request.urlopen(req)
+    except Exception:
+        pass  # 通知自体の失敗でスクリプトを落とさない
+
+
+def read_fail_count():
+    try:
+        return int(FAIL_COUNT_FILE.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def record_failure(error_detail):
+    count = read_fail_count() + 1
+    FAIL_COUNT_FILE.write_text(str(count))
+    if count == FAIL_ALERT_THRESHOLD:
+        notify_discord(
+            f"⚠️ todo同期(sync_todo.py)が{count}回連続で失敗しています。\n"
+            f"直近のエラー: {error_detail[:300]}\n"
+            f"ダッシュボードのtodoが古いままの可能性があります。"
+        )
+
+
+def record_success():
+    if FAIL_COUNT_FILE.exists():
+        FAIL_COUNT_FILE.unlink()
 
 
 def main():
     if not GIST_ID_FILE.exists():
         print(f"[sync_todo] {GIST_ID_FILE} が見つかりません。"
               f"先に `gh gist create` でgistを作成しIDを保存してください", file=sys.stderr)
+        record_failure(f"{GIST_ID_FILE} が見つかりません")
         sys.exit(1)
 
     gist_id = GIST_ID_FILE.read_text(encoding="utf-8").strip()
@@ -57,8 +113,10 @@ def main():
     )
     if result.returncode != 0:
         print(f"[sync_todo] gist更新に失敗: {result.stderr}", file=sys.stderr)
+        record_failure(result.stderr)
         sys.exit(1)
 
+    record_success()
     print(f"[sync_todo] {today} 分をGistへ同期しました")
 
 
