@@ -189,17 +189,20 @@ SECTION_META = {
 }
 
 
-def render_item(it: str):
-    """`- [x] ...` / `- [ ] ...` はチェックボックス風に、それ以外は通常の箇条書きで表示"""
+def render_item(it: str, number: int | None = None):
+    """`- [x] ...` / `- [ ] ...` はチェックボックス風に、それ以外は通常の箇条書きで表示。
+    numberを渡すとチェックリスト項目に通し番号を付ける（会話で「1番から4番まで終了」と
+    言えばなみ子がこの番号を頼りに該当行を特定できるようにするため）"""
     m = re.match(r"^\[( |x|X)\]\s*(.*)$", it)
     if not m:
         st.markdown(f"- {it}")
         return
     checked, label = m.group(1).lower() == "x", m.group(2)
+    prefix = f"{number}. " if number is not None else ""
     if checked:
-        st.markdown(f"- ✅ ~~{label}~~")
+        st.markdown(f"- {prefix}✅ ~~{label}~~")
     else:
-        st.markdown(f"- ⬜ {label}")
+        st.markdown(f"- {prefix}⬜ {label}")
 
 
 def parse_todo_md(text: str):
@@ -231,8 +234,9 @@ if todo_text:
             if not items:
                 st.caption("（まだ空です）")
                 continue
-            for it in items:
-                render_item(it)
+            is_checklist = (name == "今日のtodo(チェックリスト)")
+            for i, it in enumerate(items, start=1):
+                render_item(it, number=i if is_checklist else None)
 
     st.caption("PCから10分おきに自動同期されています")
 elif GIST_ID:
