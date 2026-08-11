@@ -182,10 +182,24 @@ def fetch_todo_from_gist(gist_id: str) -> str | None:
 
 
 SECTION_META = {
+    "今日のtodo(チェックリスト)": ("📋", False),
     "今日やったこと": ("✅", True),   # (アイコン, 完了済みとして薄く見せる)
     "明日やること": ("📅", False),
     "今後やること": ("🗓", False),
 }
+
+
+def render_item(it: str):
+    """`- [x] ...` / `- [ ] ...` はチェックボックス風に、それ以外は通常の箇条書きで表示"""
+    m = re.match(r"^\[( |x|X)\]\s*(.*)$", it)
+    if not m:
+        st.markdown(f"- {it}")
+        return
+    checked, label = m.group(1).lower() == "x", m.group(2)
+    if checked:
+        st.markdown(f"- ✅ ~~{label}~~")
+    else:
+        st.markdown(f"- ⬜ {label}")
 
 
 def parse_todo_md(text: str):
@@ -218,7 +232,7 @@ if todo_text:
                 st.caption("（まだ空です）")
                 continue
             for it in items:
-                st.markdown(f"- {it}")
+                render_item(it)
 
     st.caption("PCから10分おきに自動同期されています")
 elif GIST_ID:
