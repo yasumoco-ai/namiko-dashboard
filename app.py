@@ -1,4 +1,7 @@
+import json
 import re
+import time as time_module
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -44,6 +47,13 @@ EBETSU_LAT, EBETSU_LON = 42.9, 141.6
 
 
 # ── 天気セクション ──────────────────────────────────────────────
+# Streamlit Community Cloudは複数アプリでIPを共有しており、Open-Meteo側の
+# IP単位レート制限に他アプリの分も含めて引っかかることがある（自アプリの
+# リクエスト頻度を下げてもこの共有IP問題は解決しない）。そのため、直近の
+# 取得成功データをディスクに残し、リトライも尽きた時はそれを使い回す。
+WEATHER_CACHE_FILE = Path("/tmp/namiko_dashboard_weather_cache.json")
+
+
 @st.cache_data(ttl=1800)  # 30分キャッシュ（Open-Meteo APIを毎回叩かない）
 def fetch_weather():
     url = "https://api.open-meteo.com/v1/forecast"
@@ -55,9 +65,25 @@ def fetch_weather():
         "timezone": "Asia/Tokyo",
         "forecast_days": 2,
     }
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    return r.json()
+    last_error = None
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            data["_stale"] = False
+            WEATHER_CACHE_FILE.write_text(json.dumps(data))
+            return data
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                time_module.sleep(2 * (attempt + 1))
+
+    if WEATHER_CACHE_FILE.exists():
+        data = json.loads(WEATHER_CACHE_FILE.read_text())
+        data["_stale"] = True
+        return data
+    raise last_error
 
 
 WEATHER_EMOJI = {
@@ -80,6 +106,9 @@ try:
     data = fetch_weather()
     cur = data["current"]
     daily = data["daily"]
+
+    if data.get("_stale"):
+        st.caption("⚠️ 最新データが取得できず、前回取得できた時点のものを表示しています")
 
     col1, col2, col3 = st.columns(3)
     with col1:
