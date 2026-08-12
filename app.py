@@ -44,6 +44,7 @@ EBETSU_LAT, EBETSU_LON = 42.9, 141.6
 
 
 # ── 天気セクション ──────────────────────────────────────────────
+@st.cache_data(ttl=1800)  # 30分キャッシュ（Open-Meteo APIを毎回叩かない）
 def fetch_weather():
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
