@@ -1,6 +1,9 @@
+import email
+import imaplib
 import json
 import re
 import time as time_module
+from email.header import decode_header
 from pathlib import Path
 
 import requests
@@ -373,7 +376,89 @@ else:
     st.info("todoデータがまだ設定されていません。", icon="🚧")
 
 st.divider()
-st.info("メール・チャット・Etsy/Substack状況などは次のバージョンで追加予定です。", icon="🚧")
+
+# ── メールヘッドライン セクション ────────────────────────────────
+# yama@namiwodasu.comはロリポップ側でyasu.moco@gmail.comへ転送設定済みなので
+# ([[reference_yama_email_webmail]])、Gmailに1本IMAP接続するだけで両アドレス分を
+# 拾える。宛先ヘッダーを見てどちらの窓口宛だったかを判定して表示だけ分ける。
+st.subheader("📧 メール")
+
+GMAIL_ADDRESS = st.secrets.get("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = st.secrets.get("GMAIL_APP_PASSWORD")
+YAMA_ADDRESS = "yama@namiwodasu.com"
+
+
+def _decode_mime_header(raw: str) -> str:
+    if not raw:
+        return ""
+    parts = decode_header(raw)
+    out = ""
+    for text, enc in parts:
+        if isinstance(text, bytes):
+            out += text.decode(enc or "utf-8", errors="replace")
+        else:
+            out += text
+    return out
+
+
+@st.cache_data(ttl=600)  # 10分キャッシュ（IMAPへの接続を毎回張らない）
+def fetch_recent_emails(address: str, app_password: str, limit: int = 15):
+    if not address or not app_password:
+        return None
+    try:
+        imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        imap.login(address, app_password)
+        imap.select("INBOX", readonly=True)
+        status, data = imap.search(None, "ALL")
+        if status != "OK":
+            imap.logout()
+            return None
+        ids = data[0].split()[-limit:][::-1]  # 直近から新しい順
+        results = []
+        for eid in ids:
+            status, msg_data = imap.fetch(
+                eid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE TO DELIVERED-TO MESSAGE-ID)])"
+            )
+            if status != "OK" or not msg_data or not msg_data[0]:
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            to_field = (msg.get("To", "") + " " + msg.get("Delivered-To", "")).lower()
+            account = "yama@" if YAMA_ADDRESS in to_field else "yasu.moco@"
+            message_id = (msg.get("Message-ID") or "").strip("<>")
+            results.append({
+                "subject": _decode_mime_header(msg.get("Subject", "")) or "(件名なし)",
+                "sender": _decode_mime_header(msg.get("From", "")),
+                "date": msg.get("Date", ""),
+                "account": account,
+                "message_id": message_id,
+            })
+        imap.logout()
+        return results
+    except Exception:
+        return None
+
+
+emails = fetch_recent_emails(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+
+if emails is not None:
+    if not emails:
+        st.caption("新着メールはありません")
+    for mail in emails:
+        gmail_url = (
+            f"https://mail.google.com/mail/u/0/#search/rfc822msgid%3A{mail['message_id']}"
+            if mail["message_id"] else "https://mail.google.com/mail/u/0/"
+        )
+        badge = "🟣" if mail["account"] == "yama@" else "🔵"
+        st.markdown(
+            f"{badge} **[{mail['subject']}]({gmail_url})**  \n"
+            f"<span style='color:#888; font-size:0.85rem'>{mail['sender']} ・ {mail['account']}</span>",
+            unsafe_allow_html=True,
+        )
+    st.caption("🔵 yasu.moco@ 　🟣 yama@(転送分) 　クリックでGmailを開きます")
+elif GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
+    st.info("メールの取得に失敗しました。", icon="🚧")
+else:
+    st.info("メール連携は未設定です。", icon="🚧")
 
 st.markdown(
     """
