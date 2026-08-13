@@ -202,10 +202,21 @@ GIST_ID = st.secrets.get("TODO_GIST_ID")
 GIST_WRITE_TOKEN = st.secrets.get("GIST_WRITE_TOKEN")  # Gist専用スコープの弱い権限のトークン
 
 
+def _gist_read_headers():
+    # 認証なしのGitHub API GETは60回/時間/IPしか叩けない。Streamlit Community Cloudは
+    # 他アプリとIPを共有しているため、この枠を他アプリの分も含めてすぐ使い切ってしまい
+    # todo取得が失敗する(2026-08-13発覚。天気429と同根の「共有IPで無認証枠を食い合う」
+    # 問題)。書き込み用に発行済みのGIST_WRITE_TOKENを読み取りにも流用すると、認証あり
+    # 扱いになり上限が5000回/時間まで跳ね上がるため、これで根本的に解決する。
+    if GIST_WRITE_TOKEN:
+        return {"Authorization": f"Bearer {GIST_WRITE_TOKEN}"}
+    return {}
+
+
 @st.cache_data(ttl=300)  # 5分キャッシュ（Gist APIを毎回叩かない）
 def fetch_todo_from_gist(gist_id: str) -> str | None:
     try:
-        r = requests.get(f"https://api.github.com/gists/{gist_id}", timeout=10)
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=_gist_read_headers(), timeout=10)
         r.raise_for_status()
         return r.json()["files"]["today.md"]["content"]
     except Exception:
@@ -215,7 +226,7 @@ def fetch_todo_from_gist(gist_id: str) -> str | None:
 def fetch_todo_from_gist_fresh(gist_id: str) -> str | None:
     """書き込み前に使う、キャッシュを経由しない最新取得（他経路の更新と衝突しないため）"""
     try:
-        r = requests.get(f"https://api.github.com/gists/{gist_id}", timeout=10)
+        r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=_gist_read_headers(), timeout=10)
         r.raise_for_status()
         return r.json()["files"]["today.md"]["content"]
     except Exception:
