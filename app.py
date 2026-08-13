@@ -434,7 +434,8 @@ def fetch_recent_emails(address: str, app_password: str, limit: int = 15):
             })
         imap.logout()
         return results
-    except Exception:
+    except Exception as e:
+        st.session_state["_email_fetch_error"] = f"{type(e).__name__}: {e}"
         return None
 
 
@@ -457,6 +458,8 @@ if emails is not None:
     st.caption("🔵 yasu.moco@ 　🟣 yama@(転送分) 　クリックでGmailを開きます")
 elif GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
     st.info("メールの取得に失敗しました。", icon="🚧")
+    if st.session_state.get("_email_fetch_error"):
+        st.caption(f"詳細(デバッグ用・原因特定でき次第削除予定): {st.session_state['_email_fetch_error']}")
 else:
     st.info("メール連携は未設定です。", icon="🚧")
 
