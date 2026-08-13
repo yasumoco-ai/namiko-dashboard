@@ -408,20 +408,31 @@ def fetch_recent_emails(address: str, app_password: str, limit: int = 15):
     try:
         imap = imaplib.IMAP4_SSL("imap.gmail.com", 993)
         imap.login(address, app_password)
-        imap.select("INBOX", readonly=True)
-        status, data = imap.search(None, "ALL")
-        if status != "OK":
+        # SEARCH ALLは受信箱が大きい(このアカウントは27万通超)と応答が
+        # imaplibの1行読み込み上限を超えて壊れる(2026-08-13実測で確認済み)。
+        # SEARCHを使わず、SELECTで分かる総通数から直近N通のシーケンス番号
+        # 範囲だけをFETCHすることで、この問題を根本的に避ける。
+        status, data = imap.select("INBOX", readonly=True)
+        if status != "OK" or not data or not data[0]:
             imap.logout()
             return None
-        ids = data[0].split()[-limit:][::-1]  # 直近から新しい順
+        total = int(data[0])
+        if total == 0:
+            imap.logout()
+            return []
+        start = max(1, total - limit + 1)
+        status, msg_data = imap.fetch(
+            f"{start}:{total}", "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE TO DELIVERED-TO MESSAGE-ID)])"
+        )
+        imap.logout()
+        if status != "OK":
+            return None
+
         results = []
-        for eid in ids:
-            status, msg_data = imap.fetch(
-                eid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE TO DELIVERED-TO MESSAGE-ID)])"
-            )
-            if status != "OK" or not msg_data or not msg_data[0]:
+        for item in msg_data:
+            if not isinstance(item, tuple):
                 continue
-            msg = email.message_from_bytes(msg_data[0][1])
+            msg = email.message_from_bytes(item[1])
             to_field = (msg.get("To", "") + " " + msg.get("Delivered-To", "")).lower()
             account = "yama@" if YAMA_ADDRESS in to_field else "yasu.moco@"
             message_id = (msg.get("Message-ID") or "").strip("<>")
@@ -432,7 +443,7 @@ def fetch_recent_emails(address: str, app_password: str, limit: int = 15):
                 "account": account,
                 "message_id": message_id,
             })
-        imap.logout()
+        results.reverse()  # 直近から新しい順
         return results
     except Exception as e:
         st.session_state["_email_fetch_error"] = f"{type(e).__name__}: {e}"
@@ -459,7 +470,7 @@ if emails is not None:
 elif GMAIL_ADDRESS and GMAIL_APP_PASSWORD:
     st.info("メールの取得に失敗しました。", icon="🚧")
     if st.session_state.get("_email_fetch_error"):
-        st.caption(f"詳細(デバッグ用・原因特定でき次第削除予定): {st.session_state['_email_fetch_error']}")
+        st.caption(f"詳細: {st.session_state['_email_fetch_error']}")
 else:
     st.info("メール連携は未設定です。", icon="🚧")
 
